@@ -6,11 +6,12 @@ Author: Zachary S. Buchanan
 """
 
 import struct
+import scipy.optimize as spopt
 import numpy as np
 import scipy.signal as spsig
 import shelve
 import os
-import bcfitting as bcfit
+import qtfitting as qtfit
 import concurrent.futures
 import sys
 from scipy.optimize import brentq
@@ -56,7 +57,7 @@ class qtFTMExperiment:
         
         #store settings
         with shelve.open(os.path.expanduser('~')
-                         +'/.config/CrabtreeLab/blackchirp-python') as shf:
+                         +'/.config/CrabtreeLab/qtftm-python') as shf:
                              
             if fid_start is not None:
                 cls._fid_start = fid_start
@@ -80,7 +81,6 @@ class qtFTMExperiment:
     
     @classmethod
 
-    @classmethod
     def load_settings(cls):
         """
         Read default values from persistent storage.
@@ -91,7 +91,7 @@ class qtFTMExperiment:
         """
         try:
             with shelve.open(os.path.expanduser('~')
-                             +'/.config/CrabtreeLab/blackchirp-python') as shf:
+                             +'/.config/CrabtreeLab/qtftm-python') as shf:
                 if 'fid_start' in shf:
                     cls._fid_start = shf['fid_start']
                 if 'fid_end' in shf:
@@ -121,7 +121,7 @@ class qtFTMExperiment:
         sb = "".center(w,'*')
         
         print(sb)
-        print("BlackChirpExperiment Default Settings".center(w))
+        print("qtFTMExperiment Default Settings".center(w))
         print(sb)
         
         labels = []
@@ -161,7 +161,7 @@ class qtFTMExperiment:
             print(s.center(w))
             
         print("")
-        print(str("To modify these values, use BlackChirpExperiment." +
+        print(str("To modify these values, use qtFTMExperiment." +
               "set_ft_defaults()").center(w))
         print(sb)
         
@@ -184,8 +184,9 @@ class qtFTMExperiment:
         self.d_header_units = {}
         self.amdoronly0 = [] #rename these to what they actually mean
         self.amdoronly1 = []
+        self.amdorfrequencies = []
+        self.refNumber = {}
         self.scans = []
-        
         #AMDOR Experiment Parser
         if experimentType == 'amdor':
             with open(path+"/"+str(number)+'.txt') as fid:
@@ -205,26 +206,124 @@ class qtFTMExperiment:
                                 self.amdoronly0.append(float(tmp[0]))
                             elif tmp[1] == '1':
                                 self.amdoronly1.append(float(tmp[0]))
+                            self.amdorfrequencies.append(float(tmp[0]))
                     elif tmp[0][:9] != 'amdorscan':
                         scanhdr = {}
-                        scanhdr['amdorscan'] = int(tmp[0])
-                        scanhdr['amdoriscal'] = bool(int(tmp[1]))
-                        scanhdr['amdorisref'] = bool(int(tmp[2]))
-                        scanhdr['amdorisval'] = bool(int(tmp[3]))
-                        scanhdr['amdorftid'] = int(tmp[4])
-                        scanhdr['amdordrid'] = int(tmp[5])
-                        scanhdr['amdorintensity'] = float(tmp[6])
-                        scanhdr['amdorelapsedsecs'] = int(tmp[7])
-                        self.scans.append(scanData(scanhdr))
+                        scanhdr['scan'] = int(tmp[0])
+                        scanhdr['iscal'] = bool(int(tmp[1]))
+                        scanhdr['isref'] = bool(int(tmp[2]))
+                        scanhdr['isval'] = bool(int(tmp[3]))
+                        scanhdr['ftid'] = int(tmp[4])
+                        scanhdr['drid'] = int(tmp[5])
+                        scanhdr['intensity'] = float(tmp[6])
+                        scanhdr['elapsedsecs'] = int(tmp[7])
+                        tmpscan = scanData(scanhdr)
+                        self.scans.append(tmpscan)
+                        if scanhdr['isref']:
+                            self.refNumber[tmpscan.cavity_freq] = tmpscan.ExpHdr['scan']
+            
+        self.scanIDoffset = self.scans[0].ExpHdr['scan']
+        
+    def lookupRefScan(self,refid):
+        ref_freq = self.amdorfrequencies[refid]
+        ref_scan_number = self.refNumber[ref_freq]
+        return(ref_scan_number)
+        
+    def ft_one(self, index = 0, start = None, end = None, zpf = None, 
+               window_f = None, f_min = None, f_max = None):
+                   
+       f = self.scans[index]
+       f_data = np.array(f.fid[:])
+       
+       s_index = 0
+       e_index = f.size
+       
+       si = self._fid_start
+       ei = self._fid_end
+       
+       if start is not None:
+           si = start
+       if end is not None:
+           ei = end
+       
+       if type(si) == float:
+           s_index = int(si // f.spacing)
+       else:
+           s_index = si
+       
+       if type(ei) == float:
+           e_index = min((int(ei // f.spacing), f.size))
+           if e_index < s_index:
+               e_index = f.size
+       else:
+           if e_index < s_index:
+               e_index = f.size
+       
+       win_size = e_index - s_index
+       if window_f is not None:
+           f_data[s_index:e_index] *= window_f(win_size)
+       else:
+           f_data[s_index:e_index] *= spsig.get_window(self._ft_winf, win_size)
+       
+       if s_index > 0:
+           f_data[0:s_index-1] = 0.0
+       if e_index < f.size:
+           f_data[e_index:] = 0.0
+           
+       z = self._zpf
+       if zpf is not None:
+           z = zpf
+       if z > 0:
+           z = int(z)
+           s = 1
+           
+           while s <= f.size:
+               s = s << 1
+               
+           for i in range(0,z-1):
+               s = s << 1
+               
+           f_data.resize((s),refcheck=False)
+           
+       ft = np.fft.rfft(f_data)
+       nump = len(f_data) // 2 + 1
+       
+       out_y = np.empty(nump)
+       out_x = np.empty(nump)
+       df = 1.0 / len(f_data) / f.spacing / 1e6
+       
+       fn = self._ft_min
+       if f_min is not None:
+           fn = f_min
+       
+       fx = self._ft_max
+       if f_max is not None:
+           fx = f_max
+       
+       for i in range(0,nump):
+           out_x[i] = f.probe_freq+(df*i)
+           if ( (fn >= 0.0 and out_x[i] < fn) or (fx >= 0.0 and out_x[i] > fx) ):
+               out_y[i] = 0.0
+           else:
+               out_y[i] = np.absolute(ft[i]) * 1e3
+               
+       return out_x, out_y       
+           
+    def analyze_fid(self,xarray,yarray,params):
+       
+        res = spopt.curve_fit(qtfit.qt_doublegauss,xarray,yarray,
+                                  p0=params,full_output=True)
+        return res
                         
 
         
         
         
 class scanData:
-    def __init__(self,ExpHdr,window_f=None,path=None): 
+    def __init__(self,ExpHdr,path=None,start = None, end = None, zpf = None, 
+               window_f = None, f_min = None, f_max = None): 
         self.ExpHdr = ExpHdr
-        number = self.ExpHdr['amdorscan']
+        number = self.ExpHdr['scan']
         millions = number // 1000000
         thousands = number // 1000
         d_header_values = {}
@@ -251,18 +350,38 @@ class scanData:
                     fid.append(float(tmp[0]))                                                                                                                                                                                                                                                                                                                                                                                
 
         
-        raw_data = np.array(fid)
-        self.DRfreq = d_header_values['DR freq']
-        self.spacing = d_header_values['FID spacing']
-        self.Cavityfreq = d_header_values['Cavity freq']
-        
-        for i in raw_data:
+        fid = np.array(fid)
+        mean = np.mean(fid)
+        self.fid = fid-mean
+        self.size = int(d_header_values['FID points'])
+        self.DRfreq = float(d_header_values['DR freq'])
+        self.spacing = float(d_header_values['FID spacing'])
+        self.probe_freq = float(d_header_values['Probe freq'])
+        self.cavity_freq = float(d_header_values['Cavity freq'])
             
 
-        
-#test = qtFTMExperiment(3,'amdor')
-        
+qtFTMExperiment.load_settings()        
+test = qtFTMExperiment(4,'amdor')
+x,y = test.ft_one()
 #scanTest = scanData(hdr)
+        
+testfit = spopt.curve_fit(qtfit.qt_doublegauss,x,y,[307,8000,8509.34,0.005,5000,8509.38,0.005])
+ymodel = qtfit.qt_doublegauss(xmodel,testfit[0][0],testfit[0][1],testfit[0][2],testfit[0][3],testfit[0][4],testfit[0][5],testfit[0][6])
+plt.figure()
+plt.plot(x,y)
+plt.plot(xmodel,ymodel)
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
         
         
         
