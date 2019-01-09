@@ -309,15 +309,61 @@ class qtFTMExperiment:
                
        return out_x, out_y       
            
-    def analyze_fid(self,xarray,yarray,params):
-       
+    def analyze_fid(self,index=0):
+        xarray,yarray = self.ft_one(index)
+        baseline,peakloc,peakheight = self.paramfinder(xarray,yarray)
+        params = [baseline,peakheight[0],peakloc[0],0.005,peakheight[1],peakloc[1],0.005]
+        
+        self.scans[index].rawpeaks = [peakloc[0],peakloc[1]]
+        self.scans[index].rawints = [peakheight[0],peakheight[1]]
         res = spopt.curve_fit(qtfit.qt_doublegauss,xarray,yarray,
                                   p0=params,full_output=True)
-        return res
+        self.scans[index].peaks = [res[0][2],res[0][5]]
+        self.scans[index].ints = [res[0][1],res[0][4]]
+        xmodel = np.arange(xarray[0],xarray[-1],0.00001)
+        ymodel = qtfit.qt_doublegauss(xmodel,res[0][0],res[0][1],res[0][2],res[0][3],res[0][4],res[0][5],res[0][6])
+        return xmodel,ymodel
                         
 
+    def paramfinder(self,x,y):
+        snr = 3
+        dat = np.array(y)
+        while True:
+            if len(dat) == 0:
+                break
+            med = np.median(dat)
+            fltr = [d for d in dat if d < 10*med]
+            if len(fltr) == len(dat):
+                break
+            dat = fltr
+        baseline = np.mean(dat)
+        noise = np.std(dat)
         
+        d2y = spsig.savgol_filter(y,11,6,deriv=2)
+          
+        outx = []
+        outy = []
+        outidx = []
+        outsnr = []
         
+        if not self.quiet:
+            print("Locating peaks...")
+        #if a point has SNR > threshold, look for local min in 2nd deriv.
+        for i in range(2,len(y)-2):
+            snr_i = (y[i] - baseline)/noise
+            if snr_i >= snr:
+                if (d2y[i-2] > d2y[i-1] > d2y[i] < d2y[i+1] or
+                    d2y[i-1] > d2y[i] < d2y[i+1] < d2y[i+2]):
+                        outx.append(x[i])
+                        outy.append(y[i])
+                        outidx.append(i)
+                        outsnr.append(snr_i)
+        if len(outx) >= 2:
+            peakheight,peakloc = zip(*sorted(zip(outy, outx)))
+        else:
+            peakheight = [100,100]
+            peakloc = [x[int(len(x)*0.3)],x[int(len(x)*0.7)]]
+        return(baseline,peakloc,peakheight)
         
 class scanData:
     def __init__(self,ExpHdr,path=None,start = None, end = None, zpf = None, 
@@ -361,12 +407,15 @@ class scanData:
             
 
 qtFTMExperiment.load_settings()        
-test = qtFTMExperiment(4,'amdor')
-x,y = test.ft_one()
+test = qtFTMExperiment(3,'amdor')
+ind = 11
+x,y = test.ft_one(ind)
 #scanTest = scanData(hdr)
         
-testfit = spopt.curve_fit(qtfit.qt_doublegauss,x,y,[307,8000,8509.34,0.005,5000,8509.38,0.005])
-ymodel = qtfit.qt_doublegauss(xmodel,testfit[0][0],testfit[0][1],testfit[0][2],testfit[0][3],testfit[0][4],testfit[0][5],testfit[0][6])
+#testfit = spopt.curve_fit(qtfit.qt_doublegauss,x,y,[307,8000,8509.34,0.005,5000,8509.38,0.005])
+#testfit = spopt.curve_fit(qtfit.qt_doublegauss,x,y,[307,8000,8509.34,0.005,5000,8509.38,0.005])
+#ymodel = qtfit.qt_doublegauss(xmodel,testfit[0][0],testfit[0][1],testfit[0][2],testfit[0][3],testfit[0][4],testfit[0][5],testfit[0][6])
+xmodel,ymodel = test.analyze_fid(ind)
 plt.figure()
 plt.plot(x,y)
 plt.plot(xmodel,ymodel)
